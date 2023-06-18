@@ -46,6 +46,8 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include <U8g2lib.h>
 #include <VOCGasIndexAlgorithm.h>
 
+#include <cstdio>
+
 AirGradient ag = AirGradient(false, 115200);
 SensirionI2CSgp41 sgp41;
 VOCGasIndexAlgorithm voc_algorithm;
@@ -66,7 +68,8 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE);
 // CONFIGURATION START
 
 // set to the endpoint you would like to use
-String APIROOT = "http://192.168.0.16:3000/api/restricted/submit/";
+char API_ROOT[] = "http://192.168.0.16:3000/api/restricted/submit/";
+char API_ENDPOINT[128];
 
 // set to true to switch from Celcius to Fahrenheit
 boolean inF = false;
@@ -89,7 +92,7 @@ const int oledInterval = 5000;
 unsigned long previousOled = 0;
 
 const int sendToServerInterval = 10000;
-unsigned long previoussendToServer = 0;
+unsigned long previousSendToServer = 0;
 
 const int tvocInterval = 5000;
 unsigned long previousTVOC = 0;
@@ -98,7 +101,7 @@ int NOX = 0;
 
 const int co2Interval = 5000;
 unsigned long previousCo2 = 0;
-int Co2 = 0;
+int co2 = 0;
 
 const int pm25Interval = 5000;
 unsigned long previousPm25 = 0;
@@ -109,31 +112,39 @@ unsigned long previousTempHum = 0;
 float temp = 0;
 float hum = 0;
 
-int buttonConfig = 0;
+const int minInterval = std::min({oledInterval, sendToServerInterval, tvocInterval, co2Interval, pm25Interval, tempHumInterval});
+
+std::uint8_t buttonConfig = 0;
 int lastState = LOW;
-int currentState;
 unsigned long pressedTime = 0;
 unsigned long releasedTime = 0;
 
 // Calculate PM2.5 US AQI
-int PM_TO_AQI_US(int pm02) {
+int pmToAqi(int pm02) {
   if (pm02 <= 12.0)
-    return ((50 - 0) / (12.0 - .0) * (pm02 - .0) + 0);
+    return static_cast<int>((50 - 0) / (12.0 - .0) * (pm02 - .0) + 0);
   else if (pm02 <= 35.4)
-    return ((100 - 50) / (35.4 - 12.0) * (pm02 - 12.0) + 50);
+    return static_cast<int>((100 - 50) / (35.4 - 12.0) * (pm02 - 12.0) + 50);
   else if (pm02 <= 55.4)
-    return ((150 - 100) / (55.4 - 35.4) * (pm02 - 35.4) + 100);
+    return static_cast<int>((150 - 100) / (55.4 - 35.4) * (pm02 - 35.4) + 100);
   else if (pm02 <= 150.4)
-    return ((200 - 150) / (150.4 - 55.4) * (pm02 - 55.4) + 150);
+    return static_cast<int>((200 - 150) / (150.4 - 55.4) * (pm02 - 55.4) + 150);
   else if (pm02 <= 250.4)
-    return ((300 - 200) / (250.4 - 150.4) * (pm02 - 150.4) + 200);
+    return static_cast<int>((300 - 200) / (250.4 - 150.4) * (pm02 - 150.4) +
+                            200);
   else if (pm02 <= 350.4)
-    return ((400 - 300) / (350.4 - 250.4) * (pm02 - 250.4) + 300);
+    return static_cast<int>((400 - 300) / (350.4 - 250.4) * (pm02 - 250.4) +
+                            300);
   else if (pm02 <= 500.4)
-    return ((500 - 400) / (500.4 - 350.4) * (pm02 - 350.4) + 400);
+    return static_cast<int>((500 - 400) / (500.4 - 350.4) * (pm02 - 350.4) +
+                            400);
   else
     return 500;
 };
+
+int tempToF(float tempC) {
+  return static_cast<int>(round(tempC * 9. / 5.)) + 32;
+}
 
 void updateTVOC() {
   uint16_t srawVoc = 0;
@@ -168,7 +179,7 @@ void updateTVOC() {
 void updateCo2() {
   if (currentMillis - previousCo2 >= co2Interval) {
     previousCo2 += co2Interval;
-    Co2 = ag.getCO2_Raw();
+    co2 = ag.getCO2_Raw();
   }
 }
 
@@ -188,15 +199,14 @@ void updateTempHum() {
   }
 }
 
-void updateOLED2(String ln1, String ln2, String ln3) {
+void setOLEDLines(const char *ln1, const char *ln2, const char *ln3) {
   char buf[9];
-  u8g2.firstPage();
   u8g2.firstPage();
   do {
     u8g2.setFont(u8g2_font_t0_16_tf);
-    u8g2.drawStr(1, 10, String(ln1).c_str());
-    u8g2.drawStr(1, 30, String(ln2).c_str());
-    u8g2.drawStr(1, 50, String(ln3).c_str());
+    u8g2.drawStr(1, 10, ln1);
+    u8g2.drawStr(1, 30, ln2);
+    u8g2.drawStr(1, 50, ln3);
   } while (u8g2.nextPage());
 }
 
@@ -204,46 +214,78 @@ void updateOLED() {
   if (currentMillis - previousOled >= oledInterval) {
     previousOled += oledInterval;
 
-    String ln3;
-    String ln1;
+    const std::size_t MAX_LINE_CHARS = 24;
+
+    char line1[MAX_LINE_CHARS] = "";
+    char line2[MAX_LINE_CHARS] = "";
+    char line3[MAX_LINE_CHARS] = "";
 
     if (inUSAQI) {
-      ln1 = "AQI:" + String(PM_TO_AQI_US(pm25)) + " CO2:" + String(Co2);
+      std::snprintf(line1, MAX_LINE_CHARS, "AQI:%3d CO2:%4d", pmToAqi(pm25),
+                    co2);
     } else {
-      ln1 = "PM:" + String(pm25) + " CO2:" + String(Co2);
+      std::snprintf(line1, MAX_LINE_CHARS, "PM:%3d CO2:%4d", pm25, co2);
     }
 
-    String ln2 = "TVOC:" + (TVOC < 0 ? String("N/A") : String(TVOC)) +
-                 " NOX:" + (NOX < 0 ? String("N/A") : String(NOX));
+    if (TVOC < 0) {
+      std::snprintf(line2, MAX_LINE_CHARS, "TVOC: -  NOX: -");
+    } else {
+      std::snprintf(line2, MAX_LINE_CHARS, "TVOC:%3d NOX:%3d", TVOC, NOX);
+    }
 
     if (inF) {
-      ln3 = "F:" + String((int)round(temp * 9 / 5) + 32) +
-            " H:" + String((int)round(hum)) + "%";
+      std::snprintf(line3, MAX_LINE_CHARS, "%3d\260F RH:%3d%%", tempToF(temp),
+                    static_cast<int>(round(hum)));
     } else {
-      ln3 = "C:" + String((int)round(temp)) + " H:" + String((int)round(hum)) +
-            "%";
+      std::snprintf(line3, MAX_LINE_CHARS, "%3d\260C RH:%3d%%",
+                    static_cast<int>(round(temp)),
+                    static_cast<int>(round(hum)));
     }
-    updateOLED2(ln1, ln2, ln3);
+
+    setOLEDLines(line1, line2, line3);
   }
 }
 
 void sendToServer() {
-  if (currentMillis - previoussendToServer >= sendToServerInterval) {
-    previoussendToServer += sendToServerInterval;
-    String payload = "{\"wifi\":" + String(WiFi.RSSI()) +
-                     (Co2 < 0 ? "" : ", \"rco2\":" + String(Co2)) +
-                     (pm25 < 0 ? "" : ", \"pm02\":" + String(pm25)) +
-                     (TVOC < 0 ? "" : ", \"tvoc_index\":" + String(TVOC)) +
-                     (NOX < 0 ? "" : ", \"nox_index\":" + String(NOX)) +
-                     (isnan(temp) ? "" : ", \"atmp\":" + String(temp)) +
-                     (isnan(hum) ? "" : ", \"rhum\":" + String(hum)) + "}";
+  if (currentMillis - previousSendToServer >= sendToServerInterval) {
+    previousSendToServer += sendToServerInterval;
+
+    char payload[128];
+    char *front = payload;
+    const char * const back = payload + sizeof(payload);
+    int ret = 0;
+
+#define SNPRINTF_P(...) do { \
+    ret = std::snprintf(front, back - front,  __VA_ARGS__ ); \
+    if (ret < 0 || (front += ret) >= back) return; } while (0)
+
+    SNPRINTF_P("{\"wifi\":%hhd", WiFi.RSSI());
+    if (co2 >= 0) {
+      SNPRINTF_P(",\"rco2\":%d", co2);
+    }
+    if (pm25 >= 0) {
+      SNPRINTF_P(",\"pm02\":%d", pm25);
+    }
+    if (TVOC >= 0) {
+      SNPRINTF_P(",\"tvoc\":%d", TVOC);
+    }
+    if (NOX >= 0) {
+      SNPRINTF_P(",\"nox\":%d", NOX);
+    }
+    if (!isnan(temp)) {
+      SNPRINTF_P(",\"atmp\":%f", static_cast<double>(temp));
+    }
+    if (!isnan(hum)) {
+      SNPRINTF_P(",\"rhum\":%f", static_cast<double>(hum));
+    }
+    SNPRINTF_P("}");
+
+#undef SNPRINTF_P
 
     if (WiFi.status() == WL_CONNECTED) {
       WiFiClient client;
       HTTPClient http;
-      Serial.println();
-      Serial.println(ESP.getChipId(), HEX);
-      http.begin(client, APIROOT + String(ESP.getChipId(), HEX));
+      http.begin(client, API_ENDPOINT);
       http.addHeader("content-type", "application/json");
       int result = http.POST(payload);
       Serial.println(result);
@@ -259,76 +301,74 @@ void sendToServer() {
 void connectToWifi() {
   WiFiManager wifiManager;
   // WiFi.disconnect(); //to delete previous saved hotspot
-  String HOTSPOT = "AG-" + String(ESP.getChipId(), HEX);
-  updateOLED2("60s to connect", "to Wifi Hotspot", HOTSPOT);
+  char hotspot[16];
+  std::snprintf(hotspot, sizeof(hotspot), "AG-%08x", ESP.getChipId());
+  setOLEDLines("60s to connect", "to Wifi Hotspot", hotspot);
   wifiManager.setTimeout(60);
 
-  if (!wifiManager.autoConnect((const char *)HOTSPOT.c_str())) {
-    updateOLED2("booting into", "offline mode", "");
+  if (!wifiManager.autoConnect(hotspot)) {
+    setOLEDLines("Booting into", "offline mode", "");
     Serial.println("failed to connect and hit timeout");
     delay(6000);
   }
 }
 
 void setConfig() {
-  if (buttonConfig == 0) {
-    updateOLED2("Temp. in C", "PM in ug/m3", "Display Top");
+  switch (buttonConfig) {
+  case 0:
+    setOLEDLines("Temp. in C", "PM in ug/m3", "Display Top");
     u8g2.setDisplayRotation(U8G2_R2);
     inF = false;
     inUSAQI = false;
-  }
-  if (buttonConfig == 1) {
-    updateOLED2("Temp. in C", "PM in US AQI", "Display Top");
+    break;
+  case 1:
+    setOLEDLines("Temp. in C", "PM in US AQI", "Display Top");
     u8g2.setDisplayRotation(U8G2_R2);
     inF = false;
     inUSAQI = true;
-  }
-  if (buttonConfig == 2) {
-    updateOLED2("Temp. in F", "PM in ug/m3", "Display Top");
+    break;
+  case 2:
+    setOLEDLines("Temp. in F", "PM in ug/m3", "Display Top");
     u8g2.setDisplayRotation(U8G2_R2);
     inF = true;
     inUSAQI = false;
-  }
-  if (buttonConfig == 3) {
-    updateOLED2("Temp. in F", "PM in US AQI", "Display Top");
+    break;
+  case 3:
+    setOLEDLines("Temp. in F", "PM in US AQI", "Display Top");
     u8g2.setDisplayRotation(U8G2_R2);
     inF = true;
     inUSAQI = true;
-  }
-  if (buttonConfig == 4) {
-    updateOLED2("Temp. in C", "PM in ug/m3", "Display Top");
+    break;
+  case 4:
+    setOLEDLines("Temp. in C", "PM in ug/m3", "Display Top");
     u8g2.setDisplayRotation(U8G2_R0);
     inF = false;
     inUSAQI = false;
-  }
-  if (buttonConfig == 5) {
-    updateOLED2("Temp. in C", "PM in US AQI", "Display Top");
+    break;
+  case 5:
+    setOLEDLines("Temp. in C", "PM in US AQI", "Display Top");
     u8g2.setDisplayRotation(U8G2_R0);
     inF = false;
     inUSAQI = true;
-  }
-  if (buttonConfig == 6) {
-    updateOLED2("Temp. in F", "PM in ug/m3", "Display Top");
+    break;
+  case 6:
+    setOLEDLines("Temp. in F", "PM in ug/m3", "Display Top");
     u8g2.setDisplayRotation(U8G2_R0);
     inF = true;
     inUSAQI = false;
-  }
-  if (buttonConfig == 7) {
-    updateOLED2("Temp. in F", "PM in US AQI", "Display Top");
+    break;
+  case 7:
+    setOLEDLines("Temp. in F", "PM in US AQI", "Display Top");
     u8g2.setDisplayRotation(U8G2_R0);
     inF = true;
     inUSAQI = true;
+    break;
   }
-
-  // to do
-  // if (buttonConfig == 8) {
-  //  updateOLED2("CO2", "Manual", "Calibration");
-  // }
 }
 
 void inConf() {
   setConfig();
-  currentState = digitalRead(D7);
+  int currentState = digitalRead(D7);
 
   if (lastState == LOW && currentState == HIGH) {
     pressedTime = millis();
@@ -338,7 +378,7 @@ void inConf() {
     releasedTime = millis();
     long pressDuration = releasedTime - pressedTime;
     if (pressDuration < 1000) {
-      buttonConfig = buttonConfig + 1;
+      buttonConfig++;
       if (buttonConfig > 7)
         buttonConfig = 0;
     }
@@ -347,23 +387,14 @@ void inConf() {
   if (lastState == HIGH && currentState == HIGH) {
     long passedDuration = millis() - pressedTime;
     if (passedDuration > 4000) {
-      // to do
-      //        if (buttonConfig==4) {
-      //          updateOLED2("Saved", "Release", "Button Now");
-      //          delay(1000);
-      //          updateOLED2("Starting", "CO2", "Calibration");
-      //          delay(1000);
-      //          Co2Calibration();
-      //       } else {
-      updateOLED2("Saved", "Release", "Button Now");
+      setOLEDLines("Saved", "Release", "Button Now");
       delay(1000);
-      updateOLED2("Rebooting", "in", "5 seconds");
+      setOLEDLines("Rebooting", "in", "5 seconds");
       delay(5000);
-      EEPROM.write(addr, char(buttonConfig));
+      EEPROM.write(addr, buttonConfig);
       EEPROM.commit();
       delay(1000);
       ESP.restart();
-      //       }
     }
   }
   lastState = currentState;
@@ -374,20 +405,18 @@ void inConf() {
 void setup() {
   Serial.begin(115200);
   u8g2.begin();
-  // u8g2.setDisplayRotation(U8G2_R0);
 
   EEPROM.begin(512);
   delay(500);
 
-  buttonConfig = String(EEPROM.read(addr)).toInt();
+  buttonConfig = EEPROM.read(addr);
   setConfig();
 
-  updateOLED2("Press Button", "Now for", "Config Menu");
+  setOLEDLines("Press button", "now for", "config menu");
   delay(2000);
 
-  currentState = digitalRead(D7);
-  if (currentState == HIGH) {
-    updateOLED2("Entering", "Config Menu", "");
+  if (digitalRead(D7) == HIGH) {
+    setOLEDLines("Entering", "config menu", "");
     delay(3000);
     lastState = LOW;
     inConf();
@@ -397,7 +426,10 @@ void setup() {
     connectToWifi();
   }
 
-  updateOLED2("Warming up the", "sensors.", "");
+  std::snprintf(API_ENDPOINT, sizeof(API_ENDPOINT), "%s%x", &API_ROOT,
+                ESP.getChipId());
+
+  setOLEDLines("Warming up the", "sensors.", "");
   sgp41.begin(Wire);
   ag.CO2_Init();
   ag.PMS_Init();
@@ -412,4 +444,5 @@ void loop() {
   updatePm25();
   updateTempHum();
   sendToServer();
+  delay(minInterval / 2);
 }
