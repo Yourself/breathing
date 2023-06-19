@@ -56,8 +56,7 @@ NOxGasIndexAlgorithm nox_algorithm;
 uint16_t conditioning_s = 10;
 
 // for peristent saving and loading
-int addr = 0;
-byte value;
+int addr = 4;
 
 // Display bottom right
 // U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
@@ -112,9 +111,11 @@ unsigned long previousTempHum = 0;
 float temp = 0;
 float hum = 0;
 
-const int minInterval = std::min({oledInterval, sendToServerInterval, tvocInterval, co2Interval, pm25Interval, tempHumInterval});
+const int minInterval =
+    std::min({oledInterval, sendToServerInterval, tvocInterval, co2Interval,
+              pm25Interval, tempHumInterval});
 
-std::uint8_t buttonConfig = 0;
+std::uint8_t buttonConfig = 4;
 int lastState = LOW;
 unsigned long pressedTime = 0;
 unsigned long releasedTime = 0;
@@ -144,6 +145,14 @@ int pmToAqi(int pm02) {
 
 int tempToF(float tempC) {
   return static_cast<int>(round(tempC * 9. / 5.)) + 32;
+}
+
+int getPushButtonState() {
+#if PCB_VERSION < 40
+  return digitalRead(D7);
+#else
+  return digitalRead(D7) == LOW ? HIGH : LOW;
+#endif
 }
 
 void updateTVOC() {
@@ -252,12 +261,15 @@ void sendToServer() {
 
     char payload[128];
     char *front = payload;
-    const char * const back = payload + sizeof(payload);
+    const char *const back = payload + sizeof(payload);
     int ret = 0;
 
-#define SNPRINTF_P(...) do { \
-    ret = std::snprintf(front, back - front,  __VA_ARGS__ ); \
-    if (ret < 0 || (front += ret) >= back) return; } while (0)
+#define SNPRINTF_P(...)                                                        \
+  do {                                                                         \
+    ret = std::snprintf(front, back - front, __VA_ARGS__);                     \
+    if (ret < 0 || (front += ret) >= back)                                     \
+      return;                                                                  \
+  } while (0)
 
     SNPRINTF_P("{\"wifi\":%hhd", WiFi.RSSI());
     if (co2 >= 0) {
@@ -303,8 +315,8 @@ void connectToWifi() {
   // WiFi.disconnect(); //to delete previous saved hotspot
   char hotspot[16];
   std::snprintf(hotspot, sizeof(hotspot), "AG-%08x", ESP.getChipId());
-  setOLEDLines("60s to connect", "to Wifi Hotspot", hotspot);
-  wifiManager.setTimeout(60);
+  setOLEDLines("90s to connect", "to Wifi Hotspot", hotspot);
+  wifiManager.setTimeout(90);
 
   if (!wifiManager.autoConnect(hotspot)) {
     setOLEDLines("Booting into", "offline mode", "");
@@ -340,66 +352,72 @@ void setConfig() {
     inUSAQI = true;
     break;
   case 4:
-    setOLEDLines("Temp. in C", "PM in ug/m3", "Display Top");
+    setOLEDLines("Temp. in C", "PM in ug/m3", "Display Bottom");
     u8g2.setDisplayRotation(U8G2_R0);
     inF = false;
     inUSAQI = false;
     break;
   case 5:
-    setOLEDLines("Temp. in C", "PM in US AQI", "Display Top");
+    setOLEDLines("Temp. in C", "PM in US AQI", "Display Bottom");
     u8g2.setDisplayRotation(U8G2_R0);
     inF = false;
     inUSAQI = true;
     break;
   case 6:
-    setOLEDLines("Temp. in F", "PM in ug/m3", "Display Top");
+    setOLEDLines("Temp. in F", "PM in ug/m3", "Display Bottom");
     u8g2.setDisplayRotation(U8G2_R0);
     inF = true;
     inUSAQI = false;
     break;
   case 7:
-    setOLEDLines("Temp. in F", "PM in US AQI", "Display Top");
+    setOLEDLines("Temp. in F", "PM in US AQI", "Display Bottom");
     u8g2.setDisplayRotation(U8G2_R0);
     inF = true;
     inUSAQI = true;
+    break;
+  default:
+    buttonConfig = 0;
     break;
   }
 }
 
 void inConf() {
-  setConfig();
-  int currentState = digitalRead(D7);
+  bool config = true;
+  while (config) {
+    setConfig();
+    int currentState = getPushButtonState();
 
-  if (lastState == LOW && currentState == HIGH) {
-    pressedTime = millis();
-  }
-
-  else if (lastState == HIGH && currentState == LOW) {
-    releasedTime = millis();
-    long pressDuration = releasedTime - pressedTime;
-    if (pressDuration < 1000) {
-      buttonConfig++;
-      if (buttonConfig > 7)
-        buttonConfig = 0;
+    if (lastState == LOW && currentState == HIGH) {
+      pressedTime = millis();
     }
-  }
 
-  if (lastState == HIGH && currentState == HIGH) {
-    long passedDuration = millis() - pressedTime;
-    if (passedDuration > 4000) {
-      setOLEDLines("Saved", "Release", "Button Now");
-      delay(1000);
-      setOLEDLines("Rebooting", "in", "5 seconds");
-      delay(5000);
-      EEPROM.write(addr, buttonConfig);
-      EEPROM.commit();
-      delay(1000);
-      ESP.restart();
+    else if (lastState == HIGH && currentState == LOW) {
+      releasedTime = millis();
+      long pressDuration = releasedTime - pressedTime;
+      if (pressDuration < 1000) {
+        buttonConfig++;
+        if (buttonConfig > 7)
+          buttonConfig = 0;
+      }
     }
+
+    if (lastState == HIGH && currentState == HIGH) {
+      long passedDuration = millis() - pressedTime;
+      if (passedDuration > 4000) {
+        setOLEDLines("Saved", "Release", "Button Now");
+        delay(1000);
+        setOLEDLines("Rebooting", "in", "5 seconds");
+        delay(5000);
+        EEPROM.write(addr, buttonConfig);
+        EEPROM.commit();
+        delay(1000);
+        config = false;
+        ESP.restart();
+      }
+    }
+    lastState = currentState;
+    delay(100);
   }
-  lastState = currentState;
-  delay(100);
-  inConf();
 }
 
 void setup() {
@@ -415,7 +433,11 @@ void setup() {
   setOLEDLines("Press button", "now for", "config menu");
   delay(2000);
 
-  if (digitalRead(D7) == HIGH) {
+#if PCB_VERSION >= 40
+  pinMode(D7, INPUT_PULLUP);
+#endif
+
+  if (getPushButtonState() == HIGH) {
     setOLEDLines("Entering", "config menu", "");
     delay(3000);
     lastState = LOW;
@@ -429,7 +451,10 @@ void setup() {
   std::snprintf(API_ENDPOINT, sizeof(API_ENDPOINT), "%s%x", &API_ROOT,
                 ESP.getChipId());
 
-  setOLEDLines("Warming up the", "sensors.", "");
+  char serialBuf[24] = "";
+  std::snprintf(serialBuf, sizeof(serialBuf), "%x", ESP.getChipId());
+
+  setOLEDLines("Warming up", "Serial number:", serialBuf);
   sgp41.begin(Wire);
   ag.CO2_Init();
   ag.PMS_Init();
