@@ -245,7 +245,7 @@ void sendToServer() {
       auto root = json.object();
       root.addMember("wifi", WiFi.RSSI());
       if (co2 >= 0)
-        root.addMember("co2", co2);
+        root.addMember("rco2", co2);
       if (pm25 >= 0)
         root.addMember("pm02", pm25);
       if (gasIndex.voc_available())
