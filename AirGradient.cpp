@@ -399,7 +399,7 @@ TMP_RH AirGradient::periodicFetchData() //
   if (error == SHT3XD_NO_ERROR) {
     result = readTemperatureAndHumidity();
     sprintf(result.t_char, "%f", result.t);
-    sprintf(result.rh_char, "%f", result.rh);
+    sprintf(result.rh_char, "%d", result.rh);
 
     return result;
   } else
@@ -549,14 +549,12 @@ TMP_RH AirGradient::readTemperatureAndHumidity() //
 {
   TMP_RH result;
 
-  result.t = 0;
-  result.rh = 0;
+  result.t = NAN;
+  result.rh = -1;
 
-  TMP_RH_ErrorCode error;
   uint16_t buf[2];
 
-  if (error == SHT3XD_NO_ERROR)
-    error = read_TMP_RH(buf, 2);
+  TMP_RH_ErrorCode error = read_TMP_RH(buf, 2);
 
   if (error == SHT3XD_NO_ERROR) {
     result.t = calculateTemperature(buf[0]);
@@ -626,7 +624,7 @@ uint8_t AirGradient::calculateCrc(uint8_t data[]) {
 TMP_RH AirGradient::returnError(TMP_RH_ErrorCode error) {
   TMP_RH result;
   result.t = NAN;
-  result.rh = NAN;
+  result.rh = -1;
 
   result.t_char[0] = 'N';
   result.t_char[1] = 'U';

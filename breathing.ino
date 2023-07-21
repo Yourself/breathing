@@ -39,6 +39,8 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include <WiFiManager.h>
 
 #include "AirGradient.h"
+#include "gas_index.h"
+#include "json.h"
 
 // #include "SGP30.h"
 #include <NOxGasIndexAlgorithm.h>
@@ -49,11 +51,6 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include <cstdio>
 
 AirGradient ag = AirGradient(false, 115200);
-SensirionI2CSgp41 sgp41;
-VOCGasIndexAlgorithm voc_algorithm;
-NOxGasIndexAlgorithm nox_algorithm;
-// time in seconds needed for NOx conditioning
-uint16_t conditioning_s = 10;
 
 // for peristent saving and loading
 int addr = 4;
@@ -69,6 +66,8 @@ U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE);
 // set to the endpoint you would like to use
 char API_ROOT[] = "http://192.168.0.16:3000/api/restricted/submit/";
 char API_ENDPOINT[128];
+char API_CONTROL[] = "http://192.168.0.16:3000/api/restricted/control/";
+char API_CONTROL_EP[128];
 
 // set to true to switch from Celcius to Fahrenheit
 boolean inF = false;
@@ -93,11 +92,6 @@ unsigned long previousOled = 0;
 const int sendToServerInterval = 10000;
 unsigned long previousSendToServer = 0;
 
-const int tvocInterval = 5000;
-unsigned long previousTVOC = 0;
-int TVOC = 0;
-int NOX = 0;
-
 const int co2Interval = 5000;
 unsigned long previousCo2 = 0;
 int co2 = 0;
@@ -109,11 +103,15 @@ int pm25 = 0;
 const int tempHumInterval = 2500;
 unsigned long previousTempHum = 0;
 float temp = 0;
-float hum = 0;
+int rhum = 0;
+
+GasIndexStateMachine gasIndex;
+
+bool displayOn = true;
 
 const int minInterval =
-    std::min({oledInterval, sendToServerInterval, tvocInterval, co2Interval,
-              pm25Interval, tempHumInterval});
+    std::min({oledInterval, sendToServerInterval, gasIndex.updateInterval,
+              co2Interval, pm25Interval, tempHumInterval});
 
 std::uint8_t buttonConfig = 4;
 int lastState = LOW;
@@ -155,36 +153,6 @@ int getPushButtonState() {
 #endif
 }
 
-void updateTVOC() {
-  uint16_t srawVoc = 0;
-  uint16_t srawNox = 0;
-
-  uint16_t compensationT = static_cast<uint16_t>((temp + 45) * 65535 / 175);
-  uint16_t compensationRh = static_cast<uint16_t>(hum * 65535 / 100);
-
-  if (conditioning_s > 0) {
-    if (sgp41.executeConditioning(compensationRh, compensationT, srawVoc)) {
-      TVOC = -1;
-      NOX = -1;
-      return;
-    }
-    conditioning_s--;
-  } else {
-    if (sgp41.measureRawSignals(compensationRh, compensationT, srawVoc,
-                                srawNox)) {
-      TVOC = -1;
-      NOX = -1;
-      return;
-    }
-  }
-
-  if (currentMillis - previousTVOC >= tvocInterval) {
-    previousTVOC += tvocInterval;
-    TVOC = voc_algorithm.process(srawVoc);
-    NOX = nox_algorithm.process(srawNox);
-  }
-}
-
 void updateCo2() {
   if (currentMillis - previousCo2 >= co2Interval) {
     previousCo2 += co2Interval;
@@ -203,19 +171,27 @@ void updateTempHum() {
   if (currentMillis - previousTempHum >= tempHumInterval) {
     previousTempHum += tempHumInterval;
     TMP_RH result = ag.periodicFetchData();
-    temp = result.t;
-    hum = result.rh;
+    if (result.error == SHT3XD_NO_ERROR) {
+      temp = result.t;
+      rhum = result.rh;
+    } else {
+      Serial.print("SHT3XD Error: ");
+      Serial.println(result.error);
+      temp = NAN;
+      rhum = -1;
+    }
   }
 }
 
 void setOLEDLines(const char *ln1, const char *ln2, const char *ln3) {
-  char buf[9];
   u8g2.firstPage();
   do {
     u8g2.setFont(u8g2_font_t0_16_tf);
-    u8g2.drawStr(1, 10, ln1);
-    u8g2.drawStr(1, 30, ln2);
-    u8g2.drawStr(1, 50, ln3);
+    if (displayOn) {
+      u8g2.drawStr(1, 10, ln1);
+      u8g2.drawStr(1, 30, ln2);
+      u8g2.drawStr(1, 50, ln3);
+    }
   } while (u8g2.nextPage());
 }
 
@@ -236,19 +212,23 @@ void updateOLED() {
       std::snprintf(line1, MAX_LINE_CHARS, "PM:%3d CO2:%4d", pm25, co2);
     }
 
-    if (TVOC < 0) {
-      std::snprintf(line2, MAX_LINE_CHARS, "TVOC: -  NOX: -");
+    if (gasIndex.voc_available()) {
+      if (gasIndex.nox_available()) {
+        std::snprintf(line2, MAX_LINE_CHARS, "TVOC:%3d NOX:%3d", gasIndex.voc(),
+                      gasIndex.nox());
+      } else {
+        std::snprintf(line2, MAX_LINE_CHARS, "TVOC:%3d NOX: -", gasIndex.voc());
+      }
     } else {
-      std::snprintf(line2, MAX_LINE_CHARS, "TVOC:%3d NOX:%3d", TVOC, NOX);
+      std::snprintf(line2, MAX_LINE_CHARS, "TVOC: -  NOX: -");
     }
 
     if (inF) {
       std::snprintf(line3, MAX_LINE_CHARS, "%3d\260F RH:%3d%%", tempToF(temp),
-                    static_cast<int>(round(hum)));
+                    rhum);
     } else {
       std::snprintf(line3, MAX_LINE_CHARS, "%3d\260C RH:%3d%%",
-                    static_cast<int>(round(temp)),
-                    static_cast<int>(round(hum)));
+                    static_cast<int>(round(temp)), rhum);
     }
 
     setOLEDLines(line1, line2, line3);
@@ -260,41 +240,27 @@ void sendToServer() {
     previousSendToServer += sendToServerInterval;
 
     char payload[128];
-    char *front = payload;
-    const char *const back = payload + sizeof(payload);
-    int ret = 0;
+    JsonFormatter json(payload);
+    {
+      auto root = json.object();
+      root.addMember("wifi", WiFi.RSSI());
+      if (co2 >= 0)
+        root.addMember("co2", co2);
+      if (pm25 >= 0)
+        root.addMember("pm02", pm25);
+      if (gasIndex.voc_available())
+        root.addMember("tvoc", gasIndex.voc());
+      if (gasIndex.nox_available())
+        root.addMember("nox", gasIndex.nox());
+      if (!isnan(temp))
+        root.addMember("atmp", temp);
+      if (rhum >= 0)
+        root.addMember("rhum", rhum);
+    }
 
-#define SNPRINTF_P(...)                                                        \
-  do {                                                                         \
-    ret = std::snprintf(front, back - front, __VA_ARGS__);                     \
-    if (ret < 0 || (front += ret) >= back)                                     \
-      return;                                                                  \
-  } while (0)
-
-    SNPRINTF_P("{\"wifi\":%hhd", WiFi.RSSI());
-    if (co2 >= 0) {
-      SNPRINTF_P(",\"rco2\":%d", co2);
-    }
-    if (pm25 >= 0) {
-      SNPRINTF_P(",\"pm02\":%d", pm25);
-    }
-    if (TVOC >= 0) {
-      SNPRINTF_P(",\"tvoc\":%d", TVOC);
-    }
-    if (NOX >= 0) {
-      SNPRINTF_P(",\"nox\":%d", NOX);
-    }
-    if (!isnan(temp)) {
-      SNPRINTF_P(",\"atmp\":%f", static_cast<double>(temp));
-    }
-    if (!isnan(hum)) {
-      SNPRINTF_P(",\"rhum\":%f", static_cast<double>(hum));
-    }
-    SNPRINTF_P("}");
-
-#undef SNPRINTF_P
-
-    if (WiFi.status() == WL_CONNECTED) {
+    if (!json.formatter()) {
+      Serial.println("Failed to render json");
+    } else if (WiFi.status() == WL_CONNECTED) {
       WiFiClient client;
       HTTPClient http;
       http.begin(client, API_ENDPOINT);
@@ -305,6 +271,30 @@ void sendToServer() {
       http.end();
     } else {
       Serial.println("WiFi Disconnected");
+    }
+  }
+}
+
+const int checkControllerInterval = 60 * 1000;
+unsigned long previousCheckController = 0;
+
+void checkController() {
+  if (currentMillis - previousCheckController >= checkControllerInterval) {
+    previousCheckController += checkControllerInterval;
+    WiFiClient client;
+    HTTPClient http;
+    http.begin(client, API_CONTROL_EP);
+    int result = http.GET();
+    if (result == 200) {
+      const auto &body = http.getString();
+      Serial.println(body);
+      int brightness = 255;
+      std::sscanf(body.c_str(), "%d", &brightness);
+      displayOn = brightness > 0;
+      u8g2.setContrast(static_cast<uint8_t>(brightness));
+    } else {
+      Serial.print("Controller endpoint responded with: ");
+      Serial.println(result);
     }
   }
 }
@@ -450,12 +440,14 @@ void setup() {
 
   std::snprintf(API_ENDPOINT, sizeof(API_ENDPOINT), "%s%x", &API_ROOT,
                 ESP.getChipId());
+  std::snprintf(API_CONTROL_EP, sizeof(API_CONTROL_EP), "%s%x", &API_CONTROL,
+                ESP.getChipId());
 
   char serialBuf[24] = "";
   std::snprintf(serialBuf, sizeof(serialBuf), "%x", ESP.getChipId());
 
   setOLEDLines("Warming up", "Serial number:", serialBuf);
-  sgp41.begin(Wire);
+  gasIndex.begin(Wire);
   ag.CO2_Init();
   ag.PMS_Init();
   ag.TMP_RH_Init(0x44);
@@ -463,11 +455,12 @@ void setup() {
 
 void loop() {
   currentMillis = millis();
-  updateTVOC();
-  updateOLED();
+  gasIndex.update(temp, rhum, currentMillis);
   updateCo2();
   updatePm25();
   updateTempHum();
+  updateOLED();
   sendToServer();
+  checkController();
   delay(minInterval / 2);
 }
