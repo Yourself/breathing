@@ -103,7 +103,7 @@ int pm25 = 0;
 const int tempHumInterval = 2500;
 unsigned long previousTempHum = 0;
 float temp = 0;
-int rhum = 0;
+float rhum = 0;
 
 GasIndexStateMachine gasIndex;
 
@@ -178,7 +178,7 @@ void updateTempHum() {
       Serial.print("SHT3XD Error: ");
       Serial.println(result.error);
       temp = NAN;
-      rhum = -1;
+      rhum = NAN;
     }
   }
 }
@@ -225,10 +225,11 @@ void updateOLED() {
 
     if (inF) {
       std::snprintf(line3, MAX_LINE_CHARS, "%3d\260F RH:%3d%%", tempToF(temp),
-                    rhum);
+                    static_cast<int>(round(rhum)));
     } else {
       std::snprintf(line3, MAX_LINE_CHARS, "%3d\260C RH:%3d%%",
-                    static_cast<int>(round(temp)), rhum);
+                    static_cast<int>(round(temp)),
+                    static_cast<int>(round(rhum)));
     }
 
     setOLEDLines(line1, line2, line3);
@@ -254,7 +255,7 @@ void sendToServer() {
         root.addMember("nox", gasIndex.nox());
       if (!isnan(temp))
         root.addMember("atmp", temp);
-      if (rhum >= 0)
+      if (!isnan(rhum))
         root.addMember("rhum", rhum);
     }
 

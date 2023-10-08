@@ -1,6 +1,6 @@
 #include "gas_index.h"
 
-void GasIndexStateMachine::update(float temp, int rhum, unsigned long millis) {
+void GasIndexStateMachine::update(float temp, float rhum, unsigned long millis) {
   if (millis - prevUpdate_ < updateInterval)
     return;
 

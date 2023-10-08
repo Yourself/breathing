@@ -17,7 +17,7 @@ public:
 
   void begin(TwoWire &i2cbus) { sgp41_.begin(i2cbus); }
 
-  void update(float temp, int rhum, unsigned long millis);
+  void update(float temp, float rhum, unsigned long millis);
 
 private:
   SensirionI2CSgp41 sgp41_;
