@@ -24,7 +24,7 @@ private:
   VOCGasIndexAlgorithm voc_algo_;
   NOxGasIndexAlgorithm nox_algo_;
 
-  unsigned long nextUpdate_ = 0;
+  unsigned long prevUpdate_ = 0;
 
   int voc_ = -1;
   int nox_ = -1;

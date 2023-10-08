@@ -1,7 +1,7 @@
 #include "gas_index.h"
 
 void GasIndexStateMachine::update(float temp, int rhum, unsigned long millis) {
-  if (millis < nextUpdate_)
+  if (millis - prevUpdate_ > updateInterval)
     return;
 
   uint16_t rhumComp = static_cast<uint16_t>(rhum * 65535 / 100);
@@ -27,5 +27,5 @@ void GasIndexStateMachine::update(float temp, int rhum, unsigned long millis) {
       nox_ = nox_algo_.process(srawNox);
     }
   }
-  nextUpdate_ += updateInterval;
+  prevUpdate_ += updateInterval;
 }
